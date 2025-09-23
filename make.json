@@ -1,0 +1,29 @@
+{
+  "_notes": [
+    "This is an example configuration file for make.cs.",
+
+    "Placement: put this file in the same directory as make.cs so it is picked up automatically,",
+    "or pass its path explicitly as the single positional argument: dotnet run make.cs -- ./make.json",
+    
+    "All properties are optional — you can omit any of them and instead use CLI options or rely on defaults.",
+    "The '_notes' property is not read by the tool; it is only used here to provide inline documentation.",
+    "API keys are never stored here; always pass them via --api-key on the CLI.",
+
+    "project:                    (--project)                        Path to a .csproj file or a directory containing one.",
+    "noLogo:                     (--no-logo)                        Suppress the startup banner (default: false).",
+    "outputDir:                  (--output-dir)                     Directory where build/pack outputs are placed (default: ./output).",
+    "cacheDir:                   (--cache-dir)                      Directory for cache files (default: ./cache).",
+    "tempDir:                    (--temp-dir)                       Temporary working directory during pack (default: ./temp).",
+    "runtimesVersion:            (--runtimes-version)               Version of runtime assets to include in RID-specific packages.",
+    "runtimesUrl:                (--runtimes-url)                   URL or format string for runtime archives, often with {0} placeholder.",
+    "runtimesLicenseSpdx:        (--runtimes-license-spdx)          SPDX license expression to apply to RID packages.",
+    "runtimesLicenseFileUrl:     (--runtimes-license-file-url)      URL or format string to a license file to include in RID packages.",
+    "runtimesLicenseSpdxFileUrl: (--runtimes-license-spdx-file-url) URL or format string to a text file containing an SPDX identifier for RID packages.",
+    "nugetSource:                (--nuget-source)                   NuGet feed endpoint for push (default: https://api.nuget.org/v3/index.json)."
+  ],
+
+  "runtimesVersion": "1.0.0",
+  "runtimesUrl": "https://example.com/v{0}/runtimes.zip",
+  "runtimesLicenseFileUrl": "https://example.com/v{0}/LICENSE.txt",
+  "outputDir": "./output"
+}
