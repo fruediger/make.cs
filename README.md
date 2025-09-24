@@ -59,6 +59,9 @@ Example (using a custom config file):
 ./make.sh build ./myconfig.json
 ```
 
+> [!NOTE]
+> If a configuration file is found and used, the tool automatically changes the current working directory to the directory where the configuration file is located, for the lifetime of the tool.
+
 ### build
 
 Builds the managed project.
