@@ -18,9 +18,6 @@ using System.Text.Json.Serialization;
 const string DefaultConfigFileName = "make.json",  DefaultProjectPath = "./src",             
              DefaultCacheFileName  = "cache.json", DefaultNugetSource = "https://api.nuget.org/v3/index.json";
 
-// ===== Globally shared HttpClient =====
-using var http = new HttpClient();
-
 // ===== Shared CLI options and arguments =====
 var projectOption   = new Option<FileSystemInfo?>("--project")       { Description = "Path to a .csproj file or a directory containing one. If a directory is given, the first .csproj inside it will be used.", Arity = ArgumentArity.ExactlyOne };
 var configOption    = new Option<string?>        ("--configuration") { Description = "Build configuration to use (e.g. Debug or Release).",                                                                      Arity = ArgumentArity.ExactlyOne };
@@ -149,9 +146,15 @@ Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync co
         }
     }
 
+    string? oldCwd = null;
     JsonDocument? jsonDocument = null;
     if (configFile is not null)
     {
+        oldCwd = Directory.GetCurrentDirectory();
+        var cwd = configFile.Directory!.FullName;
+        await logger.OutputVerboseAsync(() => $"Configuration file found at '{configFile.FullName}'. Switching current working directory to '{cwd}'...", cancellationToken);
+        Directory.SetCurrentDirectory(cwd);
+
         try
         {
             await using var stream = configFile.OpenRead();
@@ -177,7 +180,7 @@ Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync co
             case { Exists: false, FullName: var fullName }: { return await logger.FailAsync($"The specified project path '{fullName}' does not exist.", cancellationToken); }
             default:
             {
-                if (Path.Combine(Environment.CurrentDirectory, DefaultProjectPath) is var x && Directory.Exists(x) && new DirectoryInfo(x).EnumerateFiles("*.csproj").FirstOrDefault() is { } fileInfo) { projectFile = fileInfo; break; }
+                if (Path.Combine(Environment.CurrentDirectory, DefaultProjectPath) is var projectPath && Directory.Exists(projectPath) && new DirectoryInfo(projectPath).EnumerateFiles("*.csproj").FirstOrDefault() is { } fileInfo) { projectFile = fileInfo; break; }
                 return await logger.FailAsync($"No project file could be resolved. Provide {projectOption.Name}, set '{projectPropertyName}' in the config, or place a .csproj in '{DefaultProjectPath}'.", cancellationToken);
             }
         }
@@ -185,16 +188,19 @@ Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync co
         var noLogo = options.GetBoolean(noLogoOption, noLogoPropertyName, false);
         if (!noLogo) { await PrintLogoAsync(logger.Out, cancellationToken); }
 
-        return await continuationAsync(logger, options, projectFile, noLogo, cancellationToken);
+        await using var httpClient = new Shared<HttpClient>(() => new());
+
+        return await continuationAsync(logger, options, projectFile, noLogo, httpClient, cancellationToken);
     }
     finally
     {
-        jsonDocument?.Dispose();
+        jsonDocument?.Dispose();        
+        if (oldCwd is not null) { Directory.SetCurrentDirectory(oldCwd); }
     }
 };
 
 // ===== Handlers =====
-async Task<int> HandleBuildAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, CancellationToken cancellationToken)
+async Task<int> HandleBuildAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken)
 {
     var config     = options.ParseResult.GetValue(configOption)    ?? "Debug";
     var defines    = options.ParseResult.GetValue(defineOption)    ?? [];
@@ -225,7 +231,7 @@ string GetOutputDir(Options options) => options.GetString(outputDirOption, "outp
 string GetCacheDir (Options options) => options.GetString(cacheDirOption,  "cacheDir",  "./cache");
 string GetTempDir  (Options options) => options.GetString(tempDirOption,   "tempDir",   "./temp");
 
-async Task<int> HandleCleanAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, CancellationToken cancellationToken)
+async Task<int> HandleCleanAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken)
 {
     var config     = options.ParseResult.GetValue(configOption);
     var noRestore  = options.ParseResult.GetValue(noRestoreOption) ?? false;
@@ -279,7 +285,7 @@ const string RuntimesVersionPropertyName = "runtimesVersion",
 string?  GetRuntimesVersion(Options options) => options.GetString(runtimesVersionOption, RuntimesVersionPropertyName);
 string?  GetRuntimesUrl    (Options options) => options.GetString(runtimesUrlOption,     RuntimesUrlPropertyName);
 
-async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, CancellationToken cancellationToken)
+async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken)
 {
     var runtimesVersion            = GetRuntimesVersion(options);
     var runtimesUrl                = GetRuntimesUrl(options);
@@ -315,7 +321,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
             catch (Exception e) { return await logger.FailAsync($"Failed to delete '{cacheFile.FullName}': [{e.GetType().Name}]: {e.Message}", cancellationToken); }
         }
 
-        foreach (var nupkg in outputDirDir.EnumerateFiles("*.nupkg"))
+        foreach (var nupkg in outputDirDir.EnumerateFiles("*.nupkg").Concat(outputDirDir.EnumerateFiles("*.snupkg")))
         {
             await logger.OutputVerboseAsync(() => $"Deleting '{nupkg.FullName}'.", cancellationToken);
             try { nupkg.Delete(); }
@@ -356,13 +362,14 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
 
             if (exit is not 0) { return exit; }
 
-            if (outputDirDir.EnumerateFiles("*.nupkg").Except(packed.Select(static p => p.File)).FirstOrDefault() is var file && file is null) { return await logger.FailAsync("Failed to find newly created nupkg file.", cancellationToken); }
+            if (outputDirDir.EnumerateFiles("*.nupkg").Except(packed.Select(static p => p.File), (IEqualityComparer<FileInfo>)FileSystemInfoEqualityComparer.Instance).FirstOrDefault() is var file && file is null)
+            { return await logger.FailAsync("Failed to find newly created nupkg file.", cancellationToken); }
             if (await file.GetNuGetPackageIdentityAsync(cancellationToken) is not var (id, version)) { return await logger.FailAsync($"Failed to get the identity of the newly created nupkg file '{file.FullName}'.", cancellationToken); }
+
             packed.Add(("core", file, id, version));
 
             await logger.OutputVerboseAsync(() => $"Core package successfully packed as '{file.FullName}'.", cancellationToken);
         }
-
 
         var packAnyRid = packAll || targets.Any(static t => t is not ("core" or "meta"));
         if (packAnyRid)
@@ -371,68 +378,101 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
 
             await logger.OutputAsync($"Using runtimes version: {runtimesVersion}", cancellationToken);
 
-            var runtimesArchiveName = $"runtimes.{runtimesVersion}";
-            var runtimesArchivePath = Path.Combine(cacheDir, runtimesArchiveName);
-            string? runtimesLicenseFile = null;
+            var runtimesCachePath = Path.Combine(cacheDir, "runtimes", runtimesVersion);
+            Directory.CreateDirectory(runtimesCachePath);
+
+            if (string.IsNullOrWhiteSpace(runtimesUrl)) { return await logger.FailAsync($"No runtimes URL specified. Provide {runtimesUrlOption.Name} or set '{RuntimesUrlPropertyName}' in the config. It may be a format string containing '{{0}}' for the version.", cancellationToken); }
+
+            if (!(string.Format(runtimesUrl, runtimesVersion) is var runtimesUriString
+                && Uri.TryCreate(runtimesUriString, UriKind.Absolute, out var runtimesUri))) { return await logger.FailAsync($"\"{runtimesUriString}\" is not a valid absolute URL.", cancellationToken); }
+
+            var runtimesArchivePath = Path.GetFullPath(Path.Combine(runtimesCachePath, Path.GetFileName(runtimesUri.LocalPath) switch { var filename when !string.IsNullOrWhiteSpace(filename) => filename, _ => $"runtimes.zip" }));
 
             if (forceRuntimesDownload || !File.Exists(runtimesArchivePath))
             {
                 if (!forceRuntimesDownload) { await logger.OutputVerboseAsync(() => $"No cached runtimes found under '{runtimesArchivePath}'.", cancellationToken); }
-                
-                if (string.IsNullOrWhiteSpace(runtimesUrl)) { return await logger.FailAsync($"No runtimes URL specified. Provide {runtimesUrlOption.Name} or set '{RuntimesUrlPropertyName}' in the config. It may be a format string containing '{{0}}' for the version.", cancellationToken); }
-                if (!(string.Format(runtimesUrl, runtimesVersion) is var runtimesUriString
-                    && Uri.TryCreate(runtimesUriString, UriKind.Absolute, out var runtimesUri))) { return await logger.FailAsync($"\"{runtimesUriString}\" is not a valid absolute URL.", cancellationToken); }
                  
                 await logger.OutputVerboseAsync(() => $"Using runtimes URL: {runtimesUriString}", cancellationToken);
                 await logger.OutputAsync("Downloading runtimes archive...", cancellationToken);     
 
-                await using (var httpStream = await http.GetStreamAsync(runtimesUri, cancellationToken))
+                await using (var httpStream = await (await httpClient.GetValueAsync(cancellationToken)).GetStreamAsync(runtimesUri, cancellationToken))
                 await using (var fileStream = File.Create(runtimesArchivePath))
                 { await httpStream.CopyToAsync(fileStream, cancellationToken); }
 
                 await logger.OutputAsync("Download complete.", cancellationToken);
                 await logger.OutputVerboseAsync(() => $"Saved runtimes archive to '{runtimesArchivePath}' ({new FileInfo(runtimesArchivePath).Length} bytes).", cancellationToken);
+            }
+            else { await logger.OutputVerboseAsync(() => $"Cached runtimes archive found under '{runtimesArchivePath}'.", cancellationToken); }
 
-                if (runtimesLicenseFileUrl is not null)
+            string? runtimesLicensePath = null;
+            if (runtimesLicenseFileUrl is not null)
+            {
+                if (!(string.Format(runtimesLicenseFileUrl, runtimesVersion) is var licenseUriString
+                    && Uri.TryCreate(licenseUriString, UriKind.Absolute, out var licenseUri))) { return await logger.FailAsync($"\"{licenseUriString}\" is not a valid absolute URL.", cancellationToken); }
+
+                runtimesLicensePath = Path.GetFullPath(Path.Combine(runtimesCachePath, Path.GetFileName(licenseUri.LocalPath) switch { var filename when !string.IsNullOrWhiteSpace(filename) => filename, _ => "LICENSE" }));
+
+                if (forceRuntimesDownload || !File.Exists(runtimesLicensePath))
                 {
-                    if (!(string.Format(runtimesLicenseFileUrl, runtimesVersion) is var licenseUriString
-                        && Uri.TryCreate(licenseUriString, UriKind.Absolute, out var licenseUri))) { return await logger.FailAsync($"\"{licenseUriString}\" is not a valid absolute URL.", cancellationToken); }
-
-                    runtimesLicenseFile = Path.Combine(cacheDir, Path.GetFileName(licenseUri.LocalPath) switch { var filename when !string.IsNullOrWhiteSpace(filename) => filename, _ => "LICENSE" });
+                    if (!forceRuntimesDownload) { await logger.OutputVerboseAsync(() => $"No cached license file found under '{runtimesLicensePath}'.", cancellationToken); }
 
                     await logger.OutputVerboseAsync(() => $"Using license file URL: {licenseUriString}", cancellationToken);
                     await logger.OutputAsync("Downloading license file...", cancellationToken);
 
-                    await using (var httpStream = await http.GetStreamAsync(licenseUri, cancellationToken))
-                    await using (var fileStream = File.Create(runtimesLicenseFile))
+                    await using (var httpStream = await (await httpClient.GetValueAsync(cancellationToken)).GetStreamAsync(licenseUri, cancellationToken))
+                    await using (var fileStream = File.Create(runtimesLicensePath))
                     { await httpStream.CopyToAsync(fileStream, cancellationToken); }
 
                     await logger.OutputAsync("Download complete.", cancellationToken);
-                    await logger.OutputVerboseAsync(() => $"Saved license file to '{runtimesLicenseFile}' ({new FileInfo(runtimesLicenseFile).Length} bytes).", cancellationToken);
-                }
+                    await logger.OutputVerboseAsync(() => $"Saved license file to '{runtimesLicensePath}' ({new FileInfo(runtimesLicensePath).Length} bytes).", cancellationToken);
+                }                
+                else { await logger.OutputVerboseAsync(() => $"Cached license file found under '{runtimesLicensePath}'.", cancellationToken); }
+            }
 
-                if (runtimesLicenseSpdx is null && runtimesLicenseSpdxFileUrl is not null)
+            string? runtimesLicenseSpdxPath = null;
+            if (runtimesLicenseSpdxFileUrl is not null)
+            {
+                if (!(string.Format(runtimesLicenseSpdxFileUrl, runtimesVersion) is var licenseSpdxUriString
+                    && Uri.TryCreate(licenseSpdxUriString, UriKind.Absolute, out var licenseSpdxUri))) { return await logger.FailAsync($"\"{licenseSpdxUriString}\" is not a valid absolute URL.", cancellationToken); }
+
+                runtimesLicenseSpdxPath = Path.GetFullPath(Path.Combine(runtimesCachePath, Path.GetFileName(licenseSpdxUri.LocalPath) switch
                 {
-                    if (!(string.Format(runtimesLicenseSpdxFileUrl, runtimesVersion) is var licenseSpdxUriString
-                        && Uri.TryCreate(licenseSpdxUriString, UriKind.Absolute, out var licenseSpdxUri))) { return await logger.FailAsync($"\"{licenseSpdxUriString}\" is not a valid absolute URL.", cancellationToken); }
+                    var filename when !string.IsNullOrWhiteSpace(filename) => filename,
+                    _ when !string.IsNullOrWhiteSpace(runtimesLicensePath) => $"{Path.GetFileName(runtimesLicensePath)}.spdx",
+                    _ => "LICENSE.spdx"
+                }));
+                
+                if (forceRuntimesDownload || !File.Exists(runtimesLicenseSpdxPath))
+                {
+                    if (!forceRuntimesDownload) { await logger.OutputVerboseAsync(() => $"No cached license SPDX file found under '{runtimesLicenseSpdxPath}'.", cancellationToken); }
 
-                    await logger.OutputVerboseAsync(() => $"Using license SPDX file URL: {licenseSpdxUriString}", cancellationToken);                    
+                    await logger.OutputVerboseAsync(() => $"Using license SPDX file URL: {licenseSpdxUriString}", cancellationToken);
                     await logger.OutputAsync("Downloading license SPDX file...", cancellationToken);
 
-                    await using (var httpStream = await http.GetStreamAsync(licenseSpdxUri, cancellationToken))
-                    using (var reader = new StreamReader(httpStream))
-                    { runtimesLicenseSpdx = (await reader.ReadToEndAsync(cancellationToken)).Trim(); }
+                    await using (var httpStream = await (await httpClient.GetValueAsync(cancellationToken)).GetStreamAsync(licenseSpdxUri, cancellationToken))
+                    await using (var fileStream = File.Create(runtimesLicenseSpdxPath))
+                    { await httpStream.CopyToAsync(fileStream, cancellationToken); }
 
                     await logger.OutputAsync("Download complete.", cancellationToken);
-                    await logger.OutputVerboseAsync(() => $"Read license SPDX identifier: {runtimesLicenseSpdx}.", cancellationToken);
+                    await logger.OutputVerboseAsync(() => $"Saved license SPDX file to '{runtimesLicenseSpdxPath}' ({new FileInfo(runtimesLicenseSpdxPath).Length} bytes).", cancellationToken);
                 }
+                else { await logger.OutputVerboseAsync(() => $"Cached license SPDX file found under '{runtimesLicenseSpdxPath}'.", cancellationToken); }
             }
-            else { await logger.OutputVerboseAsync(() => $"Cached runtimes found under '{runtimesArchivePath}'.", cancellationToken); }
 
-            if (runtimesLicenseFile is not null && runtimesLicenseSpdx is not null)
+            if (runtimesLicenseSpdxPath is not null && File.Exists(runtimesLicenseSpdxPath))
+            {
+                await using (var fileStream = File.OpenRead(runtimesLicenseSpdxPath))
+                using (var reader = new StreamReader(fileStream))
+                { runtimesLicenseSpdx = (await reader.ReadToEndAsync(cancellationToken)).Trim(); }
+                
+                await logger.OutputVerboseAsync(() => $"Read license SPDX identifier: {runtimesLicenseSpdx}.", cancellationToken);
+            }
+
+            if (runtimesLicensePath is not null && runtimesLicenseSpdx is not null)
             { await logger.OutputVerboseAsync(() => "Warning: Runtimes license SPDX identifier set and runtimes license file set. The SPDX identifier will be used for the RID packages license. The license file will still be included in the RID packages.", cancellationToken); }
 
-            var runtimesExtractPath = Path.Combine(tempDir, runtimesArchiveName);
+            var runtimesExtractPath = Path.Combine(tempDir, "runtimes", runtimesVersion);
+            Directory.CreateDirectory(runtimesExtractPath);
 
             try { ZipFile.ExtractToDirectory(runtimesArchivePath, runtimesExtractPath, overwriteFiles: true); }
             catch (Exception e) { return await logger.FailAsync($"Failed to extract runtimes archive '{runtimesArchivePath}' to '{runtimesExtractPath}': [{e.GetType().Name}]: {e.Message}", cancellationToken); }
@@ -489,6 +529,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
                             <IsPackable>true</IsPackable>
                             <IncludeBuildOutput>false</IncludeBuildOutput>
                             <NoBuild>true</NoBuild>
+                            <RestoreSources>$(RestoreSources);{Path.GetFullPath(outputDir).Replace("\\", "/")}</RestoreSources>
                             <!-- Make flavor: rid -->
                             <!-- use Condition="'$(MakeFlavor)' == 'rid'" in your "Directory.Build.targets" -->
                             <MakeFlavor>rid</MakeFlavor>
@@ -496,12 +537,12 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
                             <!-- use Condition="'$(MakeFlavorRid)' == '{rid}'" in your "Directory.Build.targets" -->
                             <MakeFlavorRid>{rid}</MakeFlavorRid>
                             {(runtimesLicenseSpdx is not null ? $"<PackageLicenseExpression>{runtimesLicenseSpdx}</PackageLicenseExpression>" : string.Empty)}
-                            {(runtimesLicenseSpdx is null && runtimesLicenseFile is not null ? $"<PackageLicenseFile>{Path.GetFileName(runtimesLicenseFile)}</PackageLicenseFile>" : string.Empty)}
+                            {(runtimesLicenseSpdx is null && runtimesLicensePath is not null ? $"<PackageLicenseFile>{Path.GetFileName(runtimesLicensePath)}</PackageLicenseFile>" : string.Empty)}
                         </PropertyGroup>
                         <ItemGroup>
-                            {(packCore ? $"<PackageReference Include=\"{packed[0].Id}\" Version=\"{packed[0].Version}\" PrivateAssets=\"all\" />" : string.Empty)}
+                            {(packCore ? $"<PackageReference Include=\"{packed[0].Id}\" Version=\"{packed[0].Version}\" />" : string.Empty)}
                             <None Include="{Path.GetFullPath(nativeFile).Replace("\\", "/")}" Pack="true" PackagePath="runtimes/{rid}/native" />
-                            {(runtimesLicenseFile is not null ? $"<None Include=\"{Path.GetFullPath(runtimesLicenseFile).Replace("\\", "/")}\" Pack=\"true\" PackagePath=\"{Path.GetFileName(runtimesLicenseFile)}\"/>" : string.Empty)}
+                            {(runtimesLicensePath is not null ? $"<None Include=\"{Path.GetFullPath(runtimesLicensePath).Replace("\\", "/")}\" Pack=\"true\" PackagePath=\"\"/>" : string.Empty)}
                         </ItemGroup>
                     </Project>
                     """,
@@ -514,20 +555,20 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
                 await logger.OutputDotnetCliAsync("pack", [
                     ridProjPath,
                     "-o", outputDir,
-                    "--no-build",
                 ], config, noRestore, noLogo, properties, cancellationToken);
 
                 var exit = await RunDotnetAsync("pack", [
                     ridProjPath,
                     "-o", outputDir,
-                    "--no-build",
                 ], config, noRestore, noLogo, properties, logger.Out, logger.Error, cancellationToken);
 
                 await logger.OutputDotnetFinishedAsync("pack", exit, cancellationToken);
 
                 if (exit is not 0) { return exit; }
 
-                if (outputDirDir.EnumerateFiles("*.nupkg").Except(packed.Select(static p => p.File)).FirstOrDefault() is var file && file is null) { return await logger.FailAsync("Failed to find newly created nupkg file.", cancellationToken); }
+                if (outputDirDir.EnumerateFiles("*.nupkg").Except(packed.Select(static p => p.File), (IEqualityComparer<FileInfo>)FileSystemInfoEqualityComparer.Instance).FirstOrDefault() is var file && file is null)
+                { return await logger.FailAsync("Failed to find newly created nupkg file.", cancellationToken); }
+                Console.WriteLine(file);
                 if (await file.GetNuGetPackageIdentityAsync(cancellationToken) is not var (id, version)) { return await logger.FailAsync($"Failed to get the identity of the newly created nupkg file '{file.FullName}'.", cancellationToken); }
                 packed.Add((rid, file, id, version));
 
@@ -544,8 +585,8 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
             switch (packed.Count)
             {
                 case <= 0: deps = []; await logger.ErrorAsync("Warning: Meta package will have no dependencies.", cancellationToken); break;
-                case 1 when packCore: deps = [ $"<PackageReference Include=\"{packed[0].Id}\" Version=\"{packed[0].Version}\" PrivateAssets=\"all\" />" ]; break;
-                default: deps = [ ..packed.Skip(packCore ? 1 : 0).Select(static p => $"<PackageReference Include=\"{p.Id}\" Version=\"{p.Version}\" PrivateAssets=\"all\" />") ]; break;
+                case 1 when packCore: deps = [ $"<PackageReference Include=\"{packed[0].Id}\" Version=\"{packed[0].Version}\" />" ]; break;
+                default: deps = [ ..packed.Skip(packCore ? 1 : 0).Select(static p => $"<PackageReference Include=\"{p.Id}\" Version=\"{p.Version}\" />") ]; break;
             }
 
             var metaProjPath = Path.Combine(tempDir, "meta.csproj");
@@ -557,6 +598,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
                         <IsPackable>true</IsPackable>
                         <IncludeBuildOutput>false</IncludeBuildOutput>
                         <NoBuild>true</NoBuild>
+                        <RestoreSources>$(RestoreSources);{Path.GetFullPath(outputDir).Replace("\\", "/")}</RestoreSources>
                         <!-- Make flavor: meta -->
                         <!-- use Condition="'$(MakeFlavor)' == 'meta'" in your "Directory.Build.targets" -->
                         <MakeFlavor>meta</MakeFlavor>
@@ -573,20 +615,19 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
             await logger.OutputDotnetCliAsync("pack", [
                 metaProjPath,
                     "-o", outputDir,
-                    "--no-build"
             ], config, noRestore, noLogo, properties, cancellationToken);
 
             var exit = await RunDotnetAsync("pack", [
                 metaProjPath,
                     "-o", outputDir,
-                    "--no-build"
             ], config, noRestore, noLogo, properties, logger.Out, logger.Error, cancellationToken);
 
             await logger.OutputDotnetFinishedAsync("pack", exit, cancellationToken);
 
             if (exit is not 0) return exit;
 
-            if (outputDirDir.EnumerateFiles("*.nupkg").Except(packed.Select(static p => p.File)).FirstOrDefault() is var file && file is null) { return await logger.FailAsync("Failed to find newly created nupkg file.", cancellationToken); }
+            if (outputDirDir.EnumerateFiles("*.nupkg").Except(packed.Select(static p => p.File), (IEqualityComparer<FileInfo>)FileSystemInfoEqualityComparer.Instance).FirstOrDefault() is var file && file is null)
+            { return await logger.FailAsync("Failed to find newly created nupkg file.", cancellationToken); }
             if (await file.GetNuGetPackageIdentityAsync(cancellationToken) is not var (id, version)) { return await logger.FailAsync($"Failed to get the identity of the newly created nupkg file '{file.FullName}'.", cancellationToken); }
             packed.Add(("meta", file, id, version));
 
@@ -614,7 +655,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
         catch (Exception e) { return await logger.FailAsync($"Failed to serialize cache file to '{cacheFile.FullName}': [{e.GetType().Name}]: {e.Message}", cancellationToken); }
 
         await logger.OutputAsync("Packaging complete.", cancellationToken);
-        await logger.OutputVerboseAsync(() => $"Packed: {string.Join(", ", packed)} ({packed.Count}), Output location: {Path.GetFullPath(outputDir)}", cancellationToken);
+        await logger.OutputVerboseAsync(() => $"Packed: {string.Join(", ", packed.Select(static p => $"{p.File.Name} [{p.Flavor}]"))} ({packed.Count}), Output location: {Path.GetFullPath(outputDir)}", cancellationToken);
 
         return 0;
     }
@@ -624,7 +665,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
     }
 }
 
-async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, CancellationToken cancellationToken)
+async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient,CancellationToken cancellationToken)
 {
     const int maxRetriesWithPack = 1;
 
@@ -779,7 +820,7 @@ async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo project
         if (retry++ >= maxRetriesWithPack) { return await logger.FailAsync("Cache is stale and repack attempt limit reached.", cancellationToken); }
 
         await logger.OutputVerboseAsync(() => $"Cache is stale — running '{packCommand.Name}' before push.", cancellationToken);
-        exit = await HandlePackAsync(logger, options, projectFile, noLogo, cancellationToken);
+        exit = await HandlePackAsync(logger, options, projectFile, noLogo, httpClient, cancellationToken);
         if (exit is not 0) { return exit; }
 
         goto CheckCache;
@@ -967,7 +1008,7 @@ static Task<int> RunDotnetAsync(string? command, IEnumerable<string?> args, stri
 }
 
 // ===== Handler prototype =====
-file delegate Task<int> HandlerAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, CancellationToken cancellationToken);
+file delegate Task<int> HandlerAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken);
 
 // ===== Logging =====
 file readonly record struct Logger(TextWriter Out, TextWriter Error, bool IsVerbose)
@@ -1094,6 +1135,64 @@ internal readonly record struct CacheData(
 internal sealed partial class CacheDataSerializerContext : JsonSerializerContext;
 
 // ===== Helpers =====
+file sealed class Shared<T> : IAsyncDisposable, IDisposable
+{
+    private Func<CancellationToken, Task<T>>? mValueFactoryAsync;
+    private T mValue = default!;
+    private bool mIsDisposed = false;
+
+    public Shared(Func<CancellationToken, Task<T>> valueFactoryAsync) => mValueFactoryAsync = valueFactoryAsync;
+
+    public Shared(Func<T> valueFactory) : this(_ => Task.FromResult(valueFactory())) { }
+
+    public void Dispose() { if (DisposeAsync() is { IsCompleted: false } disposeTask) { disposeTask.AsTask().Wait(); } }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (!mIsDisposed && mValueFactoryAsync is not null)
+        {
+            switch (mValue)
+            {                
+                case IAsyncDisposable asyncDisposable: await asyncDisposable.DisposeAsync(); break;
+                case IDisposable disposable: disposable.Dispose(); break;
+            }
+            mValue = default!;
+            mIsDisposed = true;
+        }
+    }
+
+    public async Task<T> GetValueAsync(CancellationToken cancellationToken = default)
+    {
+        if (mValueFactoryAsync is not null)
+        {
+            mValue = await mValueFactoryAsync(cancellationToken);
+            mValueFactoryAsync = null;
+        }
+
+        return mValue;
+    }
+}
+
+file sealed class FileSystemInfoEqualityComparer : IEqualityComparer<FileSystemInfo>
+{
+    private FileSystemInfoEqualityComparer() { }    
+
+    public static FileSystemInfoEqualityComparer Instance { get; } = new();
+
+    [return: NotNullIfNotNull(nameof(info))]
+    private static string? NormalizeFullPath(FileSystemInfo? info) => info is not null
+        ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(info.FullName))
+        : null;
+
+    public bool Equals(FileSystemInfo? x, FileSystemInfo? y) => OperatingSystem.IsWindows()
+        ? string.Equals(NormalizeFullPath(x), NormalizeFullPath(y), StringComparison.OrdinalIgnoreCase)
+        : string.Equals(NormalizeFullPath(x), NormalizeFullPath(y), StringComparison.Ordinal);
+
+    public int GetHashCode([DisallowNull] FileSystemInfo obj) => OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase.GetHashCode(NormalizeFullPath(obj))
+        : StringComparer.Ordinal.GetHashCode(NormalizeFullPath(obj));
+}
+
 file static class Extensions
 {
     public interface IDispatchComparable<T> where T : IComparable<T>;
