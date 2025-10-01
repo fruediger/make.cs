@@ -10,7 +10,8 @@
     "API keys are never stored here; always pass them via --api-key on the CLI.",
 
     "project:                    (--project)                        Path to a .csproj file or a directory containing one.",
-    "noLogo:                     (--no-logo)                        Suppress the startup banner (default: false).",
+    "noLogo:                     (--no-logo)                        Suppress the startup logo (default: false).",
+    "logoFile:                   (--logo-file)                      Path to a text file containting the startup logo ASCII art.",
     "outputDir:                  (--output-dir)                     Directory where build/pack outputs are placed (default: ./output).",
     "cacheDir:                   (--cache-dir)                      Directory for cache files (default: ./cache).",
     "tempDir:                    (--temp-dir)                       Temporary working directory during pack (default: ./temp).",

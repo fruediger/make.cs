@@ -23,9 +23,10 @@ var projectOption   = new Option<FileSystemInfo?>("--project")       { Descripti
 var configOption    = new Option<string?>        ("--configuration") { Description = "Build configuration to use (e.g. Debug or Release).",                                                                      Arity = ArgumentArity.ExactlyOne };
 var defineOption    = new Option<string[]?>      ("--define")        { Description = "One or more preprocessor symbols to define (semicolon or comma separated).",                                               Arity = ArgumentArity.ZeroOrMore };
 var noRestoreOption = new Option<bool?>          ("--no-restore")    { Description = "Skip the restore phase when building or packing." };
-var propertyOption  = new Option<string[]?>      ("--property")      { Description = "Additional MSBuild properties in the form name=value.",                                                                               Arity = ArgumentArity.ZeroOrMore };
+var propertyOption  = new Option<string[]?>      ("--property")      { Description = "Additional MSBuild properties in the form name=value.",                                                                    Arity = ArgumentArity.ZeroOrMore };
 var verboseOption   = new Option<bool?>          ("--verbose")       { Description = "Enable verbose logging with detailed output." };
 var noLogoOption    = new Option<bool?>          ("--no-logo")       { Description = "Suppress the startup logo." };
+var logoFileOption  = new Option<FileInfo?>      ("--logo-file")     { Description = "Path to a text file containting the startup logo ASCII art.",                                                              Arity = ArgumentArity.ExactlyOne };
 
 var configPathArgument = new Argument<FileSystemInfo?>("CONFIG_PATH")
 {
@@ -43,7 +44,7 @@ var buildCommand = new Command("build", "Build the managed project")
     projectOption,  configOption,
     defineOption,   noRestoreOption,
     propertyOption, verboseOption,
-    noLogoOption,
+    noLogoOption,   logoFileOption,
     configPathArgument
 };
 buildCommand.SetAction(GlobalSetupAsync(HandleBuildAsync));
@@ -60,7 +61,7 @@ var cleanCommand = new Command("clean", "Clean temp, cache, and output directori
     noRestoreOption, propertyOption,
     outputDirOption, cacheDirOption,
     tempDirOption,   verboseOption,
-    noLogoOption,
+    noLogoOption,    logoFileOption,
     configPathArgument
 };
 cleanCommand.SetAction(GlobalSetupAsync(HandleCleanAsync));
@@ -88,7 +89,7 @@ var packCommand = new Command("pack", "Package NuGet artifacts")
     noRestoreOption,              propertyOption,
     outputDirOption,              cacheDirOption,
     tempDirOption,                verboseOption,
-    noLogoOption,
+    noLogoOption,                 logoFileOption,
     configPathArgument
 };
 packCommand.SetAction(GlobalSetupAsync(HandlePackAsync));
@@ -113,7 +114,7 @@ var pushCommand = new Command("push", "Push NuGet packages to a feed")
     noRestoreOption,              propertyOption,
     outputDirOption,              cacheDirOption,
     tempDirOption,                verboseOption,
-    noLogoOption,
+    noLogoOption,                 logoFileOption,
     configPathArgument
 };
 pushCommand.SetAction(GlobalSetupAsync(HandlePushAsync));
@@ -125,7 +126,7 @@ return await rootCommand.Parse(args).InvokeAsync();
 // ===== Global setup =====
 Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync continuationAsync) => async (parserResult, cancellationToken) =>
 {
-    const string projectPropertyName = "project", noLogoPropertyName  = "noLogo";
+    const string projectPropertyName = "project", noLogoPropertyName  = "noLogo", logoFilePropertyName = "logoFile";
 
     var logger = new Logger(parserResult.InvocationConfiguration.Output, parserResult.InvocationConfiguration.Error, IsVerbose: parserResult.GetValue(verboseOption) ?? false);
 
@@ -186,10 +187,30 @@ Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync co
         }
 
         var noLogo = options.GetBoolean(noLogoOption, noLogoPropertyName, false);
-        if (!noLogo) { await PrintLogoAsync(logger.Out, cancellationToken); }
+        var logoFile = options.GetFileSystemInfo(logoFileOption, logoFilePropertyName);
+
+        if (!noLogo && logoFile is not null)
+        {
+            if (logoFile.Exists)
+            {
+                // Print the logo
+                await using var logoStream = logoFile.OpenRead();
+                using var reader = new StreamReader(logoStream);
+
+                while (await reader.ReadLineAsync(cancellationToken) is var line && line is not null)
+                {
+                    int width;
+                    try { width = Console.WindowWidth; }
+                    catch { width = -1; }
+
+                    await logger.Out.WriteLineAsync(line.TruncateToMaxLength(width).AsMemory(), cancellationToken);
+                }
+                await logger.Out.WriteLineAsync();
+            }
+            else { await logger.ErrorAsync($"Couldn't find the specified logo file at '{logoFile.FullName}'.", cancellationToken); }
+        }
 
         await using var httpClient = new Shared<HttpClient>(() => new());
-
         return await continuationAsync(logger, options, projectFile, noLogo, httpClient, cancellationToken);
     }
     finally
@@ -930,25 +951,6 @@ async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo project
     }
 }
 
-// ===== Logo Printing =====
-static async Task PrintLogoAsync(TextWriter @out, CancellationToken cancellationToken)
-{
-    // ===== ASCII Art =====
-    const string LogoArt = """
-
-    """; // Your ASCII art goes here
-
-    using var reader = new StringReader(LogoArt);
-    while (await reader.ReadLineAsync(cancellationToken) is var line && line is not null)
-    {
-        int width;
-        try { width = Console.WindowWidth; }
-        catch { width = -1; }
-
-        await @out.WriteLineAsync(line.TruncateToMaxLength(width).AsMemory(), cancellationToken);
-    }
-}
-
 // ===== Process runners =====
 static async Task<int> RunProcessAsync(string file, IEnumerable<string?> args, Func<TextReader, CancellationToken, Task<bool>>? outReaderAsync, Func<TextReader, CancellationToken, Task<bool>>? errorReaderAsync, CancellationToken cancellationToken)
 {
@@ -1085,14 +1087,17 @@ file static class LoggerExtensions
 file readonly record struct Options(ParseResult ParseResult, JsonDocument? JsonDocument)
 {
     [return: NotNullIfNotNull(nameof(path))]
-    private static FileSystemInfo? FromPath(string? path) => path switch
-    {
-        null => null,
-        _ when File.Exists(path) => new FileInfo(path),
-        _ when Directory.Exists(path) => new DirectoryInfo(path),
-        _ when Path.HasExtension(path) => new FileInfo(path),
-        _ => new DirectoryInfo(path)
-    };
+    private static T? FromPath<T>(string? path)
+        where T : notnull, FileSystemInfo
+        => path switch
+        {
+            null => null,
+            _ when File.Exists(path) && new FileInfo(path) is T file => file,
+            _ when Directory.Exists(path) && new DirectoryInfo(path) is T directory => directory,
+            _ when (typeof(T) == typeof(FileInfo) || Path.HasExtension(path)) && new FileInfo(path) is T file => file,
+            _ when new DirectoryInfo(path) is T directory => directory,
+            _ => null
+        };
 
     public readonly bool? GetBoolean(Option<bool?> option, string propertyName)
         => ParseResult.GetValue(option) ?? (JsonDocument?.RootElement.TryGetProperty(propertyName, out var property) is true ? property.GetBoolean() : null);
@@ -1100,11 +1105,13 @@ file readonly record struct Options(ParseResult ParseResult, JsonDocument? JsonD
     public readonly bool GetBoolean(Option<bool?> option, string propertyName, bool fallback)
         => GetBoolean(option, propertyName) ?? fallback;
 
-    public readonly FileSystemInfo? GetFileSystemInfo(Option<FileSystemInfo?> option, string propertyName)
-        => ParseResult.GetValue(option) ?? (JsonDocument?.RootElement.TryGetProperty(propertyName, out var property) is true ? FromPath(property.GetString()) : null);
+    public readonly T? GetFileSystemInfo<T>(Option<T?> option, string propertyName)
+        where T : notnull, FileSystemInfo
+        => ParseResult.GetValue(option) ?? (JsonDocument?.RootElement.TryGetProperty(propertyName, out var property) is true ? FromPath<T>(property.GetString()) : null);
 
-    public readonly FileSystemInfo GetFileSystemInfo(Option<FileSystemInfo?> option, string propertyName, string fallback)
-        => GetFileSystemInfo(option, propertyName) ?? FromPath(fallback);
+    public readonly T? GetFileSystemInfo<T>(Option<T?> option, string propertyName, string fallback)
+        where T : notnull, FileSystemInfo
+        => GetFileSystemInfo(option, propertyName) ?? FromPath<T>(fallback);
 
     public readonly string? GetString(Option<string?> option, string propertyName)        
         => ParseResult.GetValue(option) ?? (JsonDocument?.RootElement.TryGetProperty(propertyName, out var property) is true ? property.GetString() : null);
