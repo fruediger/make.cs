@@ -1,4 +1,4 @@
-#:property Version 0.0.1
+#:property Version 0.0.2
 #:package NuGet.Packaging 6.14.0
 #:package System.CommandLine 2.0.0-rc.1.25451.107
 
@@ -1152,7 +1152,9 @@ file sealed class Shared<T> : IAsyncDisposable, IDisposable
 
     public Shared(Func<T> valueFactory) : this(_ => Task.FromResult(valueFactory())) { }
 
-    public void Dispose() { if (DisposeAsync() is { IsCompleted: false } disposeTask) { disposeTask.AsTask().Wait(); } }
+#pragma warning disable CA2012 // I'm pretty sure that's an okay way of doing it
+    public void Dispose() { if (DisposeAsync() is { IsCompleted: false } disposeTask) { disposeTask.AsTask().GetAwaiter().GetResult(); } }
+#pragma warning restore CA2012 
 
     public async ValueTask DisposeAsync()
     {
