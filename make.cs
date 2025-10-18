@@ -550,7 +550,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
                             <IsPackable>true</IsPackable>
                             <IncludeBuildOutput>false</IncludeBuildOutput>
                             <NoBuild>true</NoBuild>
-                            <RestoreSources>$(RestoreSources);{Path.GetFullPath(outputDir).Replace("\\", "/")}</RestoreSources>
+                            <RestoreAdditionalProjectSources>{Path.GetFullPath(outputDir).Replace("\\", "/")}</RestoreAdditionalProjectSources>
                             <!-- Make flavor: rid -->
                             <!-- use Condition="'$(MakeFlavor)' == 'rid'" in your "Directory.Build.targets" -->
                             <MakeFlavor>rid</MakeFlavor>
@@ -619,7 +619,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
                         <IsPackable>true</IsPackable>
                         <IncludeBuildOutput>false</IncludeBuildOutput>
                         <NoBuild>true</NoBuild>
-                        <RestoreSources>$(RestoreSources);{Path.GetFullPath(outputDir).Replace("\\", "/")}</RestoreSources>
+                        <RestoreAdditionalProjectSources>{Path.GetFullPath(outputDir).Replace("\\", "/")}</RestoreAdditionalProjectSources>
                         <!-- Make flavor: meta -->
                         <!-- use Condition="'$(MakeFlavor)' == 'meta'" in your "Directory.Build.targets" -->
                         <MakeFlavor>meta</MakeFlavor>
