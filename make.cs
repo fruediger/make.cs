@@ -3,6 +3,7 @@
 #:package System.CommandLine@2.0.0-rc.2.25502.107
 
 using NuGet.Packaging;
+using NuGet.Versioning;
 using System.Collections.Immutable;
 using System.CommandLine;
 using System.Diagnostics;
@@ -16,17 +17,38 @@ using System.Text.Json.Serialization;
 
 // ===== Configuration =====
 const string DefaultConfigFileName = "make.json",  DefaultProjectPath = "./src",             
-             DefaultCacheFileName  = "cache.json", DefaultNugetSource = "https://api.nuget.org/v3/index.json";
+             DefaultCacheFileName  = "cache.json", DefaultNugetSource = "https://api.nuget.org/v3/index.json",
+             DefaultDocsPath       = "./docs";
 
-// ===== Shared CLI options and arguments =====
-var projectOption   = new Option<FileSystemInfo?>("--project")       { Description = "Path to a .csproj file or a directory containing one. If a directory is given, the first .csproj inside it will be used.", Arity = ArgumentArity.ExactlyOne };
-var configOption    = new Option<string?>        ("--configuration") { Description = "Build configuration to use (e.g. Debug or Release).",                                                                      Arity = ArgumentArity.ExactlyOne };
-var defineOption    = new Option<string[]?>      ("--define")        { Description = "One or more preprocessor symbols to define (semicolon or comma separated).",                                               Arity = ArgumentArity.ZeroOrMore };
-var noRestoreOption = new Option<bool?>          ("--no-restore")    { Description = "Skip the restore phase when building or packing." };
-var propertyOption  = new Option<string[]?>      ("--property")      { Description = "Additional MSBuild properties in the form name=value.",                                                                    Arity = ArgumentArity.ZeroOrMore };
-var verboseOption   = new Option<bool?>          ("--verbose")       { Description = "Enable verbose logging with detailed output." };
-var noLogoOption    = new Option<bool?>          ("--no-logo")       { Description = "Suppress the startup logo." };
-var logoFileOption  = new Option<FileInfo?>      ("--logo-file")     { Description = "Path to a text file containting the startup logo ASCII art.",                                                              Arity = ArgumentArity.ExactlyOne };
+// ===== CLI options and arguments =====
+var projectOption                    = new Option<FileSystemInfo?>("--project")                        { Description = "Path to a .csproj file or a directory containing one. If a directory is given, the first .csproj inside it will be used.",                   Arity = ArgumentArity.ExactlyOne };
+var configOption                     = new Option<string?>        ("--configuration")                  { Description = "Build configuration to use (e.g. Debug or Release).",                                                                                        Arity = ArgumentArity.ExactlyOne };
+var defineOption                     = new Option<string[]?>      ("--define")                         { Description = "One or more preprocessor symbols to define (semicolon or comma separated).",                                                                 Arity = ArgumentArity.ZeroOrMore };
+var noRestoreOption                  = new Option<bool?>          ("--no-restore")                     { Description = "Skip the restore phase when building or packing." };
+var propertyOption                   = new Option<string[]?>      ("--property")                       { Description = "Additional MSBuild properties in the form name=value.",                                                                                      Arity = ArgumentArity.ZeroOrMore };
+var verboseOption                    = new Option<bool?>          ("--verbose")                        { Description = "Enable verbose logging with detailed output." };
+var noLogoOption                     = new Option<bool?>          ("--no-logo")                        { Description = "Suppress the startup logo." };
+var logoFileOption                   = new Option<FileInfo?>      ("--logo-file")                      { Description = "Path to a text file containting the startup logo ASCII art.",                                                                                Arity = ArgumentArity.ExactlyOne };
+var outputDirOption                  = new Option<string?>        ("--output-dir")                     { Description = "Directory where build or pack outputs will be placed.",                                                                                      Arity = ArgumentArity.ExactlyOne };
+var cacheDirOption                   = new Option<string?>        ("--cache-dir")                      { Description = "Directory to store cached downloads (e.g. runtimes archives).",                                                                              Arity = ArgumentArity.ExactlyOne }; 
+var tempDirOption                    = new Option<string?>        ("--temp-dir")                       { Description = "Temporary working directory used during packing.",                                                                                           Arity = ArgumentArity.ExactlyOne };
+var runtimesVersionOption            = new Option<string?>        ("--runtimes-version")               { Description = "Version of the runtimes package to download and include in RID-specific packages.",                                                          Arity = ArgumentArity.ExactlyOne };
+var runtimesUrlOption                = new Option<string?>        ("--runtimes-url")                   { Description = "URL or format string for the runtimes archive. Use '{0}' as a placeholder for the version.",                                                 Arity = ArgumentArity.ExactlyOne };
+var runtimesLicenseSpdxOption        = new Option<string?>        ("--runtimes-license-spdx")          { Description = "SPDX license expression to apply to RID packages (e.g. MIT, Apache-2.0).",                                                                   Arity = ArgumentArity.ExactlyOne };
+var runtimesLicenseFileUrlOption     = new Option<string?>        ("--runtimes-license-file-url")      { Description = "URL or format string to a license file to include in RID packages. If no SPDX is set, also used as PackageLicenseFile.",                     Arity = ArgumentArity.ExactlyOne };
+var runtimesLicenseSpdxFileUrlOption = new Option<string?>        ("--runtimes-license-spdx-file-url") { Description = "URL or format string to a text file containing an SPDX identifier. Used as PackageLicenseExpression if --runtimes-license-spdx is not set.", Arity = ArgumentArity.ExactlyOne };
+var forceRuntimesDownloadOption      = new Option<bool?>          ("--force-runtimes-download")        { Description = "Force re-download of runtimes archive even if a cached version exists." };
+var targetsOption                    = new Option<string[]?>      ("--targets")                        { Description = "List of targets to pack. Use 'all' for all, 'core' for the main package, 'meta' for the meta package, or specify RIDs.",                     Arity = ArgumentArity.ZeroOrMore };
+var strictOption                     = new Option<bool?>          ("--strict")                         { Description = "Fail if a requested RID has no native binary instead of warning." };
+var noSymbolsOption                  = new Option<bool?>          ("--no-symbols")                     { Description = "Do not create a symbols package for the core project." };
+var nugetSourceOption                = new Option<string?>        ("--nuget-source")                   { Description = $"NuGet feed URL. Defaults to '{DefaultNugetSource}'.",                                                                                       Arity = ArgumentArity.ExactlyOne };
+var apiKeyOption                     = new Option<string>         ("--api-key")                        { Description = "API key for the NuGet feed.",                                                                                                                Arity = ArgumentArity.ExactlyOne,   Required = true };
+var noPackOption                     = new Option<bool?>          ("--no-pack")                        { Description = "Do not 'pack' even if cache is stale." };
+var failStaleOption                  = new Option<bool?>          ("--fail-stale")                     { Description = "Exit with error if cache is stale instead of packing." };
+var docfxOption                      = new Option<FileSystemInfo?>("--docfx")                          { Description = "Path to a docfx.json file or a directory containing one. If a directory is given, the first docfx.json inside it will be used.",             Arity = ArgumentArity.ExactlyOne };
+var docsOutputOption                 = new Option<string?>        ("--docs-output")                    { Description = "Override the documentation output directory. If omitted, the value from docfx.json is used.",                                                Arity = ArgumentArity.ExactlyOne };
+var buildBeforeDocsOption            = new Option<bool?>          ("--build-before-docs")              { Description = "Build the project before running DocFX (useful for binary-based documentation)."};
+var requireDocFxMinVersionOption     = new Option<string?>        ("--require-docfx-min-version")      { Description = "Minimum required DocFX version (e.g. 2.75.0). Fails if the installed version is older.",                                                     Arity = ArgumentArity.ExactlyOne };
 
 var configPathArgument = new Argument<FileSystemInfo?>("CONFIG_PATH")
 {
@@ -35,7 +57,7 @@ var configPathArgument = new Argument<FileSystemInfo?>("CONFIG_PATH")
     Arity = ArgumentArity.ZeroOrOne
 };
 
-// Root command
+// ===== Root command =====
 var rootCommand = new RootCommand($"Build and package tool for managed projects + native runtimes");
 
 // ===== build command =====
@@ -47,14 +69,10 @@ var buildCommand = new Command("build", "Build the managed project")
     noLogoOption,   logoFileOption,
     configPathArgument
 };
-buildCommand.SetAction(GlobalSetupAsync(HandleBuildAsync));
+buildCommand.SetAction(GlobalSetupAsync(ProjectSetupAsync(HandleBuildAsync)));
 rootCommand.Add(buildCommand);
 
 // ===== clean command =====
-var outputDirOption = new Option<string?>("--output-dir") { Description = "Directory where build or pack outputs will be placed.",         Arity = ArgumentArity.ExactlyOne };
-var cacheDirOption  = new Option<string?>("--cache-dir")  { Description = "Directory to store cached downloads (e.g. runtimes archives).", Arity = ArgumentArity.ExactlyOne }; 
-var tempDirOption   = new Option<string?>("--temp-dir")   { Description = "Temporary working directory used during packing.",              Arity = ArgumentArity.ExactlyOne };
-
 var cleanCommand = new Command("clean", "Clean temp, cache, and output directories")
 {
     projectOption,   configOption,
@@ -64,20 +82,10 @@ var cleanCommand = new Command("clean", "Clean temp, cache, and output directori
     noLogoOption,    logoFileOption,
     configPathArgument
 };
-cleanCommand.SetAction(GlobalSetupAsync(HandleCleanAsync));
+cleanCommand.SetAction(GlobalSetupAsync(ProjectSetupAsync(HandleCleanAsync)));
 rootCommand.Add(cleanCommand);
 
 // ===== pack command =====
-var runtimesVersionOption            = new Option<string?>  ("--runtimes-version")               { Description = "Version of the runtimes package to download and include in RID-specific packages.",                                                          Arity = ArgumentArity.ExactlyOne };
-var runtimesUrlOption                = new Option<string?>  ("--runtimes-url")                   { Description = "URL or format string for the runtimes archive. Use '{0}' as a placeholder for the version.",                                                 Arity = ArgumentArity.ExactlyOne };
-var runtimesLicenseSpdxOption        = new Option<string?>  ("--runtimes-license-spdx")          { Description = "SPDX license expression to apply to RID packages (e.g. MIT, Apache-2.0).",                                                                   Arity = ArgumentArity.ExactlyOne };
-var runtimesLicenseFileUrlOption     = new Option<string?>  ("--runtimes-license-file-url")      { Description = "URL or format string to a license file to include in RID packages. If no SPDX is set, also used as PackageLicenseFile.",                     Arity = ArgumentArity.ExactlyOne };
-var runtimesLicenseSpdxFileUrlOption = new Option<string?>  ("--runtimes-license-spdx-file-url") { Description = "URL or format string to a text file containing an SPDX identifier. Used as PackageLicenseExpression if --runtimes-license-spdx is not set.", Arity = ArgumentArity.ExactlyOne };
-var forceRuntimesDownloadOption      = new Option<bool?>    ("--force-runtimes-download")        { Description = "Force re-download of runtimes archive even if a cached version exists." };
-var targetsOption                    = new Option<string[]?>("--targets")                        { Description = "List of targets to pack. Use 'all' for all, 'core' for the main package, 'meta' for the meta package, or specify RIDs.",                     Arity = ArgumentArity.ZeroOrMore };
-var strictOption                     = new Option<bool?>    ("--strict")                         { Description = "Fail if a requested RID has no native binary instead of warning." };
-var noSymbolsOption                  = new Option<bool?>    ("--no-symbols")                     { Description = "Do not create a symbols package for the core project." };
-
 var packCommand = new Command("pack", "Package NuGet artifacts")
 {
     runtimesVersionOption,        runtimesUrlOption,
@@ -92,15 +100,10 @@ var packCommand = new Command("pack", "Package NuGet artifacts")
     noLogoOption,                 logoFileOption,
     configPathArgument
 };
-packCommand.SetAction(GlobalSetupAsync(HandlePackAsync));
+packCommand.SetAction(GlobalSetupAsync(ProjectSetupAsync(HandlePackAsync)));
 rootCommand.Add(packCommand);
 
 // ===== push command =====
-var nugetSourceOption = new Option<string?>("--nuget-source") { Description = $"NuGet feed URL. Defaults to '{DefaultNugetSource}'.",  Arity = ArgumentArity.ExactlyOne };
-var apiKeyOption      = new Option<string> ("--api-key")      { Description = "API key for the NuGet feed.",                           Arity = ArgumentArity.ExactlyOne,   Required = true };
-var noPackOption      = new Option<bool?>  ("--no-pack")      { Description = "Do not 'pack' even if cache is stale." };
-var failStaleOption   = new Option<bool?>  ("--fail-stale")   { Description = "Exit with error if cache is stale instead of packing." };
-
 var pushCommand = new Command("push", "Push NuGet packages to a feed")
 {
     nugetSourceOption,            apiKeyOption,
@@ -117,16 +120,41 @@ var pushCommand = new Command("push", "Push NuGet packages to a feed")
     noLogoOption,                 logoFileOption,
     configPathArgument
 };
-pushCommand.SetAction(GlobalSetupAsync(HandlePushAsync));
+pushCommand.SetAction(GlobalSetupAsync(ProjectSetupAsync(HandlePushAsync)));
 rootCommand.Add(pushCommand);
+
+// ===== docs command =====
+var docsCommand = new Command("docs", "Build project documentation using DocFX")
+{
+    docfxOption,           docsOutputOption,
+    buildBeforeDocsOption, requireDocFxMinVersionOption,
+    projectOption,         configOption,
+    defineOption,          noRestoreOption,
+    propertyOption,        verboseOption,
+    noLogoOption,          logoFileOption,
+    configPathArgument
+};
+docsCommand.SetAction(GlobalSetupAsync(DocsSetupAsync(HandleDocsAsync)));
+rootCommand.Add(docsCommand);
+
+// ===== docs clean command =====
+var docsCleanCommand = new Command("clean", "Clean documentation output directory")
+{
+    docfxOption,   docsOutputOption,
+    verboseOption, noLogoOption,
+    logoFileOption,
+    configPathArgument
+};
+docsCleanCommand.SetAction(GlobalSetupAsync(DocsSetupAsync(HandleDocsCleanAsync)));
+docsCommand.Add(docsCleanCommand);
 
 // ===== Invoke =====
 return await rootCommand.Parse(args).InvokeAsync();
 
-// ===== Global setup =====
+// ===== Setup wrappers =====
 Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync continuationAsync) => async (parserResult, cancellationToken) =>
 {
-    const string projectPropertyName = "project", noLogoPropertyName  = "noLogo", logoFilePropertyName = "logoFile";
+    const string noLogoPropertyName  = "noLogo", logoFilePropertyName = "logoFile";
 
     var logger = new Logger(parserResult.InvocationConfiguration.Output, parserResult.InvocationConfiguration.Error, IsVerbose: parserResult.GetValue(verboseOption) ?? false);
 
@@ -166,25 +194,8 @@ Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync co
     }
 
     try
-    {
+    {        
         var options = new Options(parserResult, jsonDocument);
-
-        FileInfo projectFile;
-        switch (options.GetFileSystemInfo(projectOption, projectPropertyName))
-        {
-            case FileInfo { Exists: true } fileInfo: { projectFile = fileInfo; break; }
-            case DirectoryInfo { Exists: true, FullName: var fullName } dirInfo:
-            {
-                if (dirInfo.EnumerateFiles("*.csproj").FirstOrDefault() is { } fileInfo) { projectFile = fileInfo; break; }
-                return await logger.FailAsync($"No project file (*.csproj) found in directory '{fullName}'.", cancellationToken);
-            }
-            case { Exists: false, FullName: var fullName }: { return await logger.FailAsync($"The specified project path '{fullName}' does not exist.", cancellationToken); }
-            default:
-            {
-                if (Path.Combine(Environment.CurrentDirectory, DefaultProjectPath) is var projectPath && Directory.Exists(projectPath) && new DirectoryInfo(projectPath).EnumerateFiles("*.csproj").FirstOrDefault() is { } fileInfo) { projectFile = fileInfo; break; }
-                return await logger.FailAsync($"No project file could be resolved. Provide {projectOption.Name}, set '{projectPropertyName}' in the config, or place a .csproj in '{DefaultProjectPath}'.", cancellationToken);
-            }
-        }
 
         var noLogo = options.GetBoolean(noLogoOption, noLogoPropertyName, false);
         var logoFile = options.GetFileSystemInfo(logoFileOption, logoFilePropertyName);
@@ -210,14 +221,62 @@ Func<ParseResult, CancellationToken, Task<int>> GlobalSetupAsync(HandlerAsync co
             else { await logger.ErrorAsync($"Couldn't find the specified logo file at '{logoFile.FullName}'.", cancellationToken); }
         }
 
-        await using var httpClient = new Shared<HttpClient>(() => new());
-        return await continuationAsync(logger, options, projectFile, noLogo, httpClient, cancellationToken);
-    }
+        return await continuationAsync(logger, options, noLogo, cancellationToken);
+    }    
     finally
     {
         jsonDocument?.Dispose();        
         if (oldCwd is not null) { Directory.SetCurrentDirectory(oldCwd); }
     }
+};
+
+HandlerAsync ProjectSetupAsync(ProjectHandlerAsync continuationAsync) => async (logger, options, noLogo, cancellationToken) =>
+{
+    const string projectPropertyName = "project";
+
+    FileInfo projectFile;
+    switch (options.GetFileSystemInfo(projectOption, projectPropertyName))
+    {
+        case FileInfo { Exists: true } fileInfo: { projectFile = fileInfo; break; }
+        case DirectoryInfo { Exists: true, FullName: var fullName } dirInfo:
+        {
+            if (dirInfo.EnumerateFiles("*.csproj").FirstOrDefault() is { } fileInfo) { projectFile = fileInfo; break; }
+            return await logger.FailAsync($"No project file (*.csproj) found in directory '{fullName}'.", cancellationToken);
+        }
+        case { Exists: false, FullName: var fullName }: { return await logger.FailAsync($"The specified project path '{fullName}' does not exist.", cancellationToken); }
+        default:
+        {
+            if (Path.Combine(Environment.CurrentDirectory, DefaultProjectPath) is var projectPath && Directory.Exists(projectPath) && new DirectoryInfo(projectPath).EnumerateFiles("*.csproj").FirstOrDefault() is { } fileInfo) { projectFile = fileInfo; break; }
+            return await logger.FailAsync($"No project file could be resolved. Provide {projectOption.Name}, set '{projectPropertyName}' in the config, or place a .csproj in '{DefaultProjectPath}'.", cancellationToken);
+        }
+    }
+
+    await using var httpClient = new Shared<HttpClient>(() => new());
+    return await continuationAsync(logger, options, projectFile, noLogo, httpClient, cancellationToken);
+};
+
+HandlerAsync DocsSetupAsync(DocsHandlerAsync continuationAsync) => async (logger, options, noLogo, cancellationToken) =>
+{
+    const string docfxPropertyName = "docfx";
+
+    FileInfo docsFile;
+    switch (options.GetFileSystemInfo(docfxOption, docfxPropertyName))
+    {
+        case FileInfo { Exists: true } fileInfo: { docsFile = fileInfo; break; }
+        case DirectoryInfo { Exists: true, FullName: var fullName } dirInfo:
+        {
+            if (dirInfo.EnumerateFiles("docfx.json").FirstOrDefault() is { } fileInfo) { docsFile = fileInfo; break; }
+            return await logger.FailAsync($"No 'docfx.json' found in directory '{fullName}'.", cancellationToken);
+        }
+        case { Exists: false, FullName: var fullName }: { return await logger.FailAsync($"The specified docfx path '{fullName}' does not exist.", cancellationToken); }
+        default:
+        {
+            if (Path.Combine(Environment.CurrentDirectory, DefaultDocsPath) is var docsPath && Directory.Exists(docsPath) && new DirectoryInfo(docsPath).EnumerateFiles("docfx.json").FirstOrDefault() is { } fileInfo) { docsFile = fileInfo; break; }
+            return await logger.FailAsync($"No 'docfx.json' could be resolved. Provide {docfxOption.Name}, set '{docfxPropertyName}' in the config, or place a 'docfx.json' in '{DefaultDocsPath}'.", cancellationToken);
+        }
+    }
+
+    return await continuationAsync(logger, options, docsFile, noLogo, cancellationToken);
 };
 
 // ===== Handlers =====
@@ -276,26 +335,11 @@ async Task<int> HandleCleanAsync(Logger logger, Options options, FileInfo projec
     await logger.OutputDotnetFinishedAsync("clean", exit, cancellationToken);
 
     // Remove our own output/cache/temp dirs
-    exit = await deleteDir(outputDir, exit);
-    exit = await deleteDir(cacheDir, exit);
-    exit = await deleteDir(tempDir, exit);
+    exit = await DeleteDirectoryAsync(outputDir, exit, logger, cancellationToken);
+    exit = await DeleteDirectoryAsync(cacheDir, exit, logger, cancellationToken);
+    exit = await DeleteDirectoryAsync(tempDir, exit, logger, cancellationToken);
 
     return exit;
-
-    async Task<int> deleteDir(string dir, int exit)
-    {
-        if (Directory.Exists(dir))
-        {
-            try
-            {
-                await logger.OutputVerboseAsync(() => $" Attempting to delete directory: '{dir}'", cancellationToken);
-                Directory.Delete(dir, true);
-                await logger.OutputAsync($"Successfully deleted '{dir}'", cancellationToken);
-            }
-            catch (Exception e) { exit = await logger.FailAsync($"Failed to delete '{dir}': [{e.GetType().Name}]: {e.Message}", cancellationToken); }
-        }
-        return exit;
-    }
 }
 
 #pragma warning disable CS0162 // Why is this still a thing for local constants which are part of a top-level statement program? They're most certainly not 'unreachable' and even more certainly not 'code'
@@ -635,12 +679,12 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
             // Run dotnet pack
             await logger.OutputDotnetCliAsync("pack", [
                 metaProjPath,
-                    "-o", outputDir,
+                "-o", outputDir,
             ], config, noRestore, noLogo, properties, cancellationToken);
 
             var exit = await RunDotnetAsync("pack", [
                 metaProjPath,
-                    "-o", outputDir,
+                "-o", outputDir,
             ], config, noRestore, noLogo, properties, logger.Out, logger.Error, cancellationToken);
 
             await logger.OutputDotnetFinishedAsync("pack", exit, cancellationToken);
@@ -686,7 +730,7 @@ async Task<int> HandlePackAsync(Logger logger, Options options, FileInfo project
     }
 }
 
-async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient,CancellationToken cancellationToken)
+async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken)
 {
     const int maxRetriesWithPack = 1;
 
@@ -762,7 +806,7 @@ async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo project
 
         // check if the cache is up-to-date
         // the way it's done here is highly ineffecient, but it helps with two things:
-        // - we don't have to deal with implementing a custom equality comparison for 'CacheData' and 'CacheData.InputsData' just because they happen to have collection reference types as their members
+        // - we don't have to deal with implementing a custom equality comparison for 'CacheData' and 'CacheData.InputsData' just because they happen to have collection types as their members
         // - even though we're using a 'Version' member to differentiate them, using the same JsonSerializerContext for both avoids having versioning issues
         var cacheJson      = JsonSerializer.Serialize(cache,      CacheDataSerializerContext.Default.CacheData);
         var localCacheJson = JsonSerializer.Serialize(localCache, CacheDataSerializerContext.Default.CacheData);
@@ -951,6 +995,123 @@ async Task<int> HandlePushAsync(Logger logger, Options options, FileInfo project
     }
 }
 
+const string DocsOutputPropertyName = "docsOutput";
+string? GetDocsOutput(Options options) => options.GetString(docsOutputOption, DocsOutputPropertyName);
+
+async Task<int> HandleDocsCleanAsync(Logger logger, Options options, FileInfo docsFile, bool noLogo, CancellationToken cancellationToken)
+{
+    var docsOutput = GetDocsOutput(options);
+
+    List<string> dirsToClean  = [];
+    if (!string.IsNullOrWhiteSpace(docsOutput)) { dirsToClean.Add(docsOutput); }
+    else // parse the docfx.json docsFile for "build.output", "build.debugOutput", "build.rawModelOutputFolder", and "build.viewModelOutputFolder"
+    {        
+        try
+        {
+            await using var stream = docsFile.OpenRead();
+            using var jsonDocument = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+
+            if (jsonDocument.RootElement.TryGetProperty("build", out var build))
+            {
+                var docsFileContainingDir = docsFile.Directory?.FullName ?? string.Empty;
+                foreach (var property in (ReadOnlySpan<string>)[ "output", "debugOutput", "rawModelOutputFolder", "viewModelOutputFolder" ])
+                {
+                    if (build.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.String && value.GetString() is var dirToClean && !string.IsNullOrWhiteSpace(dirToClean))
+                    { dirsToClean.Add(Path.Combine(docsFileContainingDir, dirToClean)); /* relative path values in a 'docfx.json' are always relative to the 'docfx.json' file */ }
+                }
+            }
+        }
+        catch (JsonException) { return await logger.FailAsync($"The docfx.json file '{docsFile.FullName}' contains invalid JSON.", cancellationToken); }
+        catch (IOException e) { return await logger.FailAsync($"Failed to read docfx.json '{docsFile.FullName}': [{e.GetType().Name}]: {e.Message}", cancellationToken); }
+    }
+
+    if (dirsToClean.Count is not > 0) { return await logger.FailAsync($"No documentation output directories could be resolved. Provide {docsOutputOption.Name}, set '{DocsOutputPropertyName}' in config, or define 'build.output' in docfx.json.", cancellationToken); }
+
+    var exit = 0;
+    foreach (var dirToClean in dirsToClean) { exit = await DeleteDirectoryAsync(dirToClean, exit, logger, cancellationToken); }
+
+    return exit;
+}
+
+async Task<int> HandleDocsAsync(Logger logger, Options options, FileInfo docsFile, bool noLogo, CancellationToken cancellationToken)
+{
+    var docsOutput             = GetDocsOutput(options);
+    var buildBeforeDocs        = options.GetBoolean(buildBeforeDocsOption, "buildBeforeDocs", false);
+    var requireDocFxMinVersion = options.GetString(requireDocFxMinVersionOption, "requireDocfxMinVersion");
+
+    int exit;
+    if (buildBeforeDocs)
+    {
+        await logger.OutputAsync("Building project before generating docs...", cancellationToken);
+        exit = await ProjectSetupAsync(HandleBuildAsync)(logger, options, noLogo, cancellationToken);
+        if (exit is not 0) { return exit; }
+    }
+
+    NuGetVersion? docFxVersion = null;
+    exit = await RunProcessAsync("dotnet", [ "tool", "run", "docfx", "--version" ],
+        async (procOut, cancellationToken) =>
+        {
+            var line = await procOut.ReadLineAsync(cancellationToken);
+            if (line is null) { await Task.Yield(); return false; }
+            if (NuGetVersion.TryParse(line, out var version)) { docFxVersion = version; }
+            return true;
+        },
+        errorReaderAsync: null,    
+        cancellationToken
+    ); 
+
+    if (exit is not 0)
+    {
+        await logger.ErrorAsync( $"""
+            'dotnet tool run docfx --version' failed with exit code {exit}.
+            DocFx might not be installed as a local dotnet cli tool.
+            """, cancellationToken);
+    }
+    else if (docFxVersion is null)
+    {
+        exit = 1;
+        await logger.ErrorAsync("""
+            Failed to parse DocFX version from 'dotnet tool run docfx --version'.
+            Ensure DocFX is correctly installed as a local dotnet cli tool.
+            """, cancellationToken);
+    }
+    else if (NuGetVersion.TryParse(requireDocFxMinVersion, out var docFxMinVersion) && docFxMinVersion > docFxVersion)
+    {
+        exit = 1;
+        await logger.ErrorAsync("""
+            Installed DocFX version ({docFxVersion}) does not meet the minimum required version ({docFxMinVersion}).
+            Please update your local dotnet cli DocFX tool.
+            """, cancellationToken);
+    }
+    if (exit is not 0)
+    {
+        return await logger.FailAsync("""
+            To install or update DocFX as a local dotnet cli tool, you can run
+              dotnet tool install docfx --local
+            or
+              dotnet tool update docfx --local
+            """, errorCode: exit, cancellationToken);
+    }
+
+    await logger.OutputAsync($"Generating docs for '{docsFile.FullName}'...", cancellationToken);
+
+    if (string.IsNullOrWhiteSpace(docsOutput)) { docsOutput = null; }
+
+    await logger.OutputDotnetCliAsync("tool", [ "run", "docfx",
+        "build", docsFile.FullName,
+        docsOutput is not null ? "--output" : null, docsOutput is not null ? Path.GetFullPath(docsOutput) : null
+    ], config: "Release", noRestore: false, noLogo: false, properties: [], cancellationToken);
+
+    exit = await RunDotnetAsync("tool", [ "run", "docfx",
+        "build", docsFile.FullName,
+        docsOutput is not null ? "--output" : null, docsOutput is not null ? Path.GetFullPath(docsOutput) : null
+    ], config: "Release", noRestore: false, noLogo: false /* "dotnet tool run docfx build" doesn't actually accept a "--nologo" option */, properties: [], logger.Out, logger.Error, cancellationToken);
+
+    await logger.OutputDotnetFinishedAsync("tool run docfx build", exit, cancellationToken);   
+
+    return exit;
+}
+
 // ===== Process runners =====
 static async Task<int> RunProcessAsync(string file, IEnumerable<string?> args, Func<TextReader, CancellationToken, Task<bool>>? outReaderAsync, Func<TextReader, CancellationToken, Task<bool>>? errorReaderAsync, CancellationToken cancellationToken)
 {
@@ -1009,8 +1170,26 @@ static Task<int> RunDotnetAsync(string? command, IEnumerable<string?> args, stri
     );
 }
 
-// ===== Handler prototype =====
-file delegate Task<int> HandlerAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken);
+// ===== Helper methods =====
+static async Task<int> DeleteDirectoryAsync(string directory, int exit, Logger logger, CancellationToken cancellationToken = default)
+{
+    if (Directory.Exists(directory))
+    {
+        try
+        {
+            await logger.OutputVerboseAsync(() => $" Attempting to delete directory: '{directory}'", cancellationToken);
+            Directory.Delete(directory, true);
+            await logger.OutputAsync($"Successfully deleted '{directory}'", cancellationToken);
+        }
+        catch (Exception e) { exit = await logger.FailAsync($"Failed to delete '{directory}': [{e.GetType().Name}]: {e.Message}", cancellationToken); }
+    }
+    return exit;
+}
+
+// ===== Handler prototypes =====
+file delegate Task<int> HandlerAsync(Logger logger, Options options, bool noLogo, CancellationToken cancellationToken);
+file delegate Task<int> ProjectHandlerAsync(Logger logger, Options options, FileInfo projectFile, bool noLogo, Shared<HttpClient> httpClient, CancellationToken cancellationToken);
+file delegate Task<int> DocsHandlerAsync(Logger logger, Options options, FileInfo docsFile, bool noLogo, CancellationToken cancellationToken);
 
 // ===== Logging =====
 file readonly record struct Logger(TextWriter Out, TextWriter Error, bool IsVerbose)
@@ -1141,7 +1320,7 @@ internal readonly record struct CacheData(
 [JsonSerializable(typeof(CacheData))]
 internal sealed partial class CacheDataSerializerContext : JsonSerializerContext;
 
-// ===== Helpers =====
+// ===== Helper types =====
 file sealed class Shared<T> : IAsyncDisposable, IDisposable
 {
     private Func<CancellationToken, Task<T>>? mValueFactoryAsync;
@@ -1158,7 +1337,7 @@ file sealed class Shared<T> : IAsyncDisposable, IDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (!mIsDisposed && mValueFactoryAsync is not null)
+        if (!mIsDisposed && mValueFactoryAsync is null)
         {
             switch (mValue)
             {                

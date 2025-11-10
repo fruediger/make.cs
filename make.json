@@ -20,7 +20,11 @@
     "runtimesLicenseSpdx:        (--runtimes-license-spdx)          SPDX license expression to apply to RID packages.",
     "runtimesLicenseFileUrl:     (--runtimes-license-file-url)      URL or format string to a license file to include in RID packages.",
     "runtimesLicenseSpdxFileUrl: (--runtimes-license-spdx-file-url) URL or format string to a text file containing an SPDX identifier for RID packages.",
-    "nugetSource:                (--nuget-source)                   NuGet feed endpoint for push (default: https://api.nuget.org/v3/index.json)."
+    "nugetSource:                (--nuget-source)                   NuGet feed endpoint for push (default: https://api.nuget.org/v3/index.json).",
+    "docfx:                      (--docfx)                          Path to a docfx.json file or a directory containing one.",
+    "docsOutput:                 (--docs-output)                    Override the documentation output directory. If omitted, the value from docfx.json is used.",
+    "buildBeforeDocs:            (--build-before-docs)              Build the project before running DocFX (useful for binary-based documentation).",
+    "requireDocfxMinVersion:     (--require-docfx-min-version)      Minimum required DocFX version (e.g. 2.75.0). Fails if the installed version is older."
   ],
 
   "runtimesVersion": "1.0.0",
